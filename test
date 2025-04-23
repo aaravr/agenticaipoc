@@ -1,0 +1,63 @@
+@startuml
+skinparam sequenceMessageAlign center
+skinparam maxMessageSize 250
+
+participant "KYCFlow UI" as UI
+participant "KYCFlow Backend" as BE
+participant "RDS" as RDS
+participant "RAAS Rules" as RAAS
+
+== Initialize Static Data ==
+UI -> BE: Get static data options
+BE --> UI: Return list of request types
+
+== Create New Request ==
+UI -> BE: Create new request\n(with selected request type)
+BE -> BE: Create workflow case
+
+== Package Creation ==
+BE -> RDS: Create package API request\n(request type, context id, CE)
+RDS --> BE: Package acknowledgment\n(package id)
+
+== Async Package Processing ==
+RDS -> RAAS: Get GB non-policy requirements
+RAAS --> RDS: Return GB requirements codes
+RDS -> RAAS: Get CIP Seed data requirements
+RAAS --> RDS: Return CIP requirements codes
+
+RDS -> RDS: Construct requirements\n(GB non-policy & CIP seed data)
+RDS -> BE: Send package confirmation notification
+
+== Status Polling ==
+loop Until package completion
+    UI -> BE: Poll package status
+    BE --> UI: Return current status
+end
+
+== Requirements Processing ==
+BE -> RDS: Get requirements API call
+RDS --> BE: Return requirements
+BE -> BE: Store requirements in\nlocal tables
+BE -> BE: Update package status\nto completed
+
+== UI Update ==
+UI -> BE: Poll package status
+BE --> UI: Return completed status
+UI -> UI: Show seed data and\nGB non-policy requirement tabs
+
+== Requirements Fulfillment ==
+UI -> BE: Submit filled seed data requirements
+BE -> BE: Validate all requirements
+
+loop For each requirement
+    BE -> RDS: Patch API call with\nfulfilled requirement
+    RDS --> BE: Patch confirmation
+end
+
+== Final Re-execution ==
+BE -> RDS: Re-execute API call
+RDS --> BE: Execution confirmation
+BE -> RDS: Get updated requirements
+RDS --> BE: Return final requirements
+
+@enduml
