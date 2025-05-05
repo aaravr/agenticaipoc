@@ -1,0 +1,8 @@
+/AgentWithFastMCP/.idea
+.DS_Store
+AgentWithFastMCP/.env
+mvpserver/spring-ai-mcp-server-sse.iml
+mvpserver/spring-ai-mcp-server-sse.ipr
+mvpserver/spring-ai-mcp-server-sse.iws
+mvpserver/src/main/main.iml
+mvpserver/src/test/test.iml

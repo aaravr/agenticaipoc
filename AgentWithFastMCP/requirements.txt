@@ -1,0 +1,5 @@
+langchain-openai==0.0.5
+requests==2.31.0
+sseclient-py==1.8.0
+python-dotenv==1.0.0
+fastmcp==0.1.0
