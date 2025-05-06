@@ -6,7 +6,7 @@ spring:
   ai:
     mcp:
       server:
-        name: my-dummy-users-server
+        name: kycflow-sse-server
         version: 0.0.1
         type: SYNC
         stdio: false
@@ -15,8 +15,23 @@ spring:
         tool-change-notification: true
         prompt-change-notification: true
 
+
+management:
+  tracing:
+    enabled: true
+
 server:
   port: 8080
 
+# application.yml
 logging:
-  ROOT: TRACE
+  level:
+    # Core rerequest–response logging
+    org.springframework.web: TRACE
+    org.springframework.http: TRACE          # encoders / decoders
+    org.springframework.web.servlet.mvc.method.annotation.SseEmitter: TRACE
+    # Spring‑AI MCP internals
+    org.springframework.ai.mcp: TRACE
+    io.modelcontextprotocol: TRACE            # MCP protocol layer
+    # Reactor Netty (if you use WebFlux)
+    reactor.netty.http.server: DEBUG

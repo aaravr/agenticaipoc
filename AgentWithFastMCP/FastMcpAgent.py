@@ -25,6 +25,7 @@ load_dotenv()
 MCP_SERVER_URL = "http://localhost:8080/mcp/message"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+
 class MCPAgent:
     def __init__(self, mcp_url: str = MCP_SERVER_URL):
         self.mcp_url = mcp_url
@@ -145,7 +146,7 @@ class MCPAgent:
         # Generate a plan
         plan_json = self.planner.run(tools=tool_names, task=task)
         print("\nRaw plan from LLM:", plan_json)
-        
+
         try:
             plan = json.loads(plan_json)
             if not isinstance(plan, list):
@@ -160,7 +161,7 @@ class MCPAgent:
             if not isinstance(step, dict) or "name" not in step or "input" not in step:
                 print(f"Invalid step format: {step}")
                 continue
-                
+
             name = step["name"]
             inp = step["input"]
             print(f"\n>>> Calling {name} with {inp}")
@@ -177,6 +178,7 @@ class MCPAgent:
 
         print("\n✅ Workflow complete!")
 
+
 def main():
     if not OPENAI_API_KEY:
         print("Error: OPENAI_API_KEY not found in environment variables")
@@ -184,10 +186,11 @@ def main():
         print("Example .env file content:")
         print("OPENAI_API_KEY=your_actual_openai_api_key_here")
         return
-    
+
     agent = MCPAgent()
     task = "Onboard client with data name=Test client, email=test@email.com. You need to first create the client, then complete QA verification and  then approve the case using approval task"
     agent.execute_task(task)
+
 
 if __name__ == "__main__":
     main()
