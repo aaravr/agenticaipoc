@@ -45,8 +45,19 @@ class MCPAgent:
                 "capitalisation.*\n\n"
                 "Available tools: {tools}\n\n"
                 "Task:\n{task}\n\n"
-                "Return a JSON array; for example:\n"
-                "[{{\"name\": \"saveClientInfo\", \"input\": {{}}}}]\n"
+                "Each tool call must include both 'name' and 'input' fields. The input must be a map object.\n"
+                "For any operation involving client information, wrap the parameters inside a 'clientInfo' object.\n\n"
+                "Examples for different tools:\n"
+                "1. For saveClientInfo:\n"
+                "{{\"name\": \"saveClientInfo\", \"input\": {{\"clientInfo\": {{\"name\": \"Client Name\", \"email\": \"client@email.com\"}}}}}}\n\n"
+                "2. For qaVerify:\n"
+                "{{\"name\": \"qaVerify\", \"input\": {{\"clientInfo\": {{\"clientId\": \"123\", \"status\": \"pending\"}}}}}}\n\n"
+                "3. For approve:\n"
+                "{{\"name\": \"approve\", \"input\": {{\"clientInfo\": {{\"clientId\": \"123\", \"action\": \"approve\"}}}}}}\n\n"
+                "Return a JSON array of tool calls; for example:\n"
+                "[{{\"name\": \"saveClientInfo\", \"input\": {{\"clientInfo\": {{\"name\": \"Test Client\", \"email\": \"test@email.com\"}}}}}},\n"
+                " {{\"name\": \"qaVerify\", \"input\": {{\"clientInfo\": {{\"clientId\": \"123\", \"status\": \"pending\"}}}}}},\n"
+                " {{\"name\": \"approve\", \"input\": {{\"clientInfo\": {{\"clientId\": \"123\", \"action\": \"approve\"}}}}}}]\n"
                 "Do **not** add commentary or markdown."
             ),
         )
@@ -189,14 +200,48 @@ class MCPAgent:
         # Generate a plan
         plan_json = self.planner.run(tools=tool_names, task=task)
         print("\nRaw plan from LLM:", plan_json)
-
+        
         try:
             plan = json.loads(plan_json)
             if not isinstance(plan, list):
                 raise ValueError("Plan must be a JSON array")
+                
+            # Validate that each step has the correct structure
+            for step in plan:
+                if not isinstance(step, dict):
+                    raise ValueError(f"Step must be a dictionary, got {type(step)}")
+                if "name" not in step:
+                    raise ValueError("Step must include 'name' field")
+                if "input" not in step:
+                    raise ValueError("Step must include 'input' field")
+                if not isinstance(step["input"], dict):
+                    raise ValueError("Input must be a map object")
+                
+                # Validate that client-related operations use clientInfo wrapper
+                if step["name"] in ["saveClientInfo", "qaVerify", "approve"]:
+                    client_info = step["input"].get("clientInfo", {})
+                    if not client_info or not isinstance(client_info, dict):
+                        raise ValueError(f"Operation {step['name']} must include parameters in a 'clientInfo' map")
+                    
+                    # Specific validation for saveClientInfo
+                    if step["name"] == "saveClientInfo":
+                        if not client_info.get("name") or not client_info.get("email"):
+                            raise ValueError("Client name and email must be provided in the clientInfo map")
+                    # Specific validation for qaVerify
+                    elif step["name"] == "qaVerify":
+                        if not client_info.get("clientId"):
+                            raise ValueError("Client ID must be provided in the clientInfo map for qaVerify")
+                    # Specific validation for approve
+                    elif step["name"] == "approve":
+                        if not client_info.get("clientId"):
+                            raise ValueError("Client ID must be provided in the clientInfo map for approve")
+                
         except json.JSONDecodeError as e:
             print(f"Error parsing plan JSON: {e}")
             print("Please ensure the LLM returns a valid JSON array")
+            return
+        except ValueError as e:
+            print(f"Error in plan validation: {e}")
             return
 
         # Execute each step
@@ -204,7 +249,7 @@ class MCPAgent:
             if not isinstance(step, dict) or "name" not in step or "input" not in step:
                 print(f"Invalid step format: {step}")
                 continue
-
+                
             name = step["name"]
             inp = step["input"]
             print(f"\n>>> Calling {name} with {inp}")
