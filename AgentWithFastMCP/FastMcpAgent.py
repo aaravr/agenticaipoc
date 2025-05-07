@@ -4,6 +4,7 @@ import os
 import json
 import requests
 import uuid
+import httpx
 from typing import List, Dict, Any
 from sseclient import SSEClient
 from langchain_openai import OpenAI
@@ -24,6 +25,8 @@ load_dotenv()
 # Configuration
 MCP_SERVER_URL = "http://localhost:8080/mcp/message"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+HTTP_PROXY = os.getenv("HTTP_PROXY")
+HTTPS_PROXY = os.getenv("HTTPS_PROXY")
 
 
 class MCPAgent:
@@ -46,7 +49,22 @@ class MCPAgent:
                 "Do **not** add commentary or markdown."
             ),
         )
-        self.llm = OpenAI(api_key=OPENAI_API_KEY, temperature=0)
+        
+        # Configure OpenAI with proxy settings
+        openai_config = {
+            "api_key": OPENAI_API_KEY,
+            "temperature": 0
+        }
+        
+        # Add proxy settings only if they exist
+        if HTTP_PROXY or HTTPS_PROXY:
+            transport = httpx.HTTPTransport(
+                proxy=HTTPS_PROXY or HTTP_PROXY,
+                verify=True  # Set to False if you have SSL certificate issues
+            )
+            openai_config["http_client"] = httpx.Client(transport=transport)
+                
+        self.llm = OpenAI(**openai_config)
         self.planner = LLMChain(llm=self.llm, prompt=plan_prompt)
 
     # ------------------------------------------------------------------ #
@@ -54,7 +72,7 @@ class MCPAgent:
     # ------------------------------------------------------------------ #
     def _ensure_session(self) -> None:
         """
-        Spring AI MCP keeps an `SseEmitter` open at **GET /sse** (root path).
+        Spring AI MCP keeps an `SseEmitter` open at **GET /sse** (root path).
         We create one connection and reuse it for all JSON‑RPC calls.
         """
         if hasattr(self, "_sse_client"):
@@ -64,7 +82,15 @@ class MCPAgent:
 
         parts = urlsplit(self.mcp_url)
         sse_url = f"{parts.scheme}://{parts.netloc}/sse"
-        resp = requests.get(
+        
+        # Create a session without proxy for MCP server
+        session = requests.Session()
+        if HTTP_PROXY or HTTPS_PROXY:
+            session.proxies = {
+                "no_proxy": "localhost,127.0.0.1"  # Don't use proxy for localhost
+            }
+            
+        resp = session.get(
             sse_url,
             headers={"Accept": "text/event-stream"},
             stream=True,
@@ -87,7 +113,15 @@ class MCPAgent:
         self._ensure_session()
         req_id = str(uuid.uuid4())
         payload = {"jsonrpc": "2.0", "method": method, "id": req_id, "params": params}
-        requests.post(self.mcp_url, json=payload, timeout=30).raise_for_status()
+        
+        # Create a session without proxy for MCP server
+        session = requests.Session()
+        if HTTP_PROXY or HTTPS_PROXY:
+            session.proxies = {
+                "no_proxy": "localhost,127.0.0.1"  # Don't use proxy for localhost
+            }
+            
+        session.post(self.mcp_url, json=payload, timeout=30).raise_for_status()
 
         for event in self._sse_client.events():
             if not event.data:
@@ -118,7 +152,15 @@ class MCPAgent:
             }
         )
         print("Sending request:", json.dumps(request, indent=2))
-        response = requests.post(self.mcp_url, json=request, stream=True)
+        
+        # Create a session without proxy for MCP server
+        session = requests.Session()
+        if HTTP_PROXY or HTTPS_PROXY:
+            session.proxies = {
+                "no_proxy": "localhost,127.0.0.1"  # Don't use proxy for localhost
+            }
+            
+        response = session.post(self.mcp_url, json=request, stream=True)
         response.raise_for_status()
         print("Received response status:", response.status_code)
 
@@ -146,7 +188,7 @@ class MCPAgent:
         # Generate a plan
         plan_json = self.planner.run(tools=tool_names, task=task)
         print("\nRaw plan from LLM:", plan_json)
-
+        
         try:
             plan = json.loads(plan_json)
             if not isinstance(plan, list):
@@ -161,7 +203,7 @@ class MCPAgent:
             if not isinstance(step, dict) or "name" not in step or "input" not in step:
                 print(f"Invalid step format: {step}")
                 continue
-
+                
             name = step["name"]
             inp = step["input"]
             print(f"\n>>> Calling {name} with {inp}")
@@ -186,7 +228,7 @@ def main():
         print("Example .env file content:")
         print("OPENAI_API_KEY=your_actual_openai_api_key_here")
         return
-
+    
     agent = MCPAgent()
     task = "Onboard client with data name=Test client, email=test@email.com. You need to first create the client, then complete QA verification and  then approve the case using approval task"
     agent.execute_task(task)

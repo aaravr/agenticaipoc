@@ -1,5 +1,7 @@
 spring:
   application:
+
+
     name: mcp-spring-java
   main:
     banner-mode: off
