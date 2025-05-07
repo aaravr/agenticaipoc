@@ -8,8 +8,8 @@
     <version>3.4.4</version>
     <relativePath/> <!-- lookup parent from repository -->
   </parent>
-  <groupId>com.ubs.kycflow</groupId>
-  <artifactId>kycflow-mcp-poc</artifactId>
+  <groupId>com.abc.abcflow</groupId>
+  <artifactId>abcflow-mcp-poc</artifactId>
   <version>0.0.1-SNAPSHOT</version>
   <name>spring-ai-mcp-server-sse</name>
   <description>spring-ai-mcp-server-sse</description>
