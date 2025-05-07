@@ -4,6 +4,7 @@ import os
 import json
 import requests
 import uuid
+import httpx
 from typing import List, Dict, Any
 from sseclient import SSEClient
 from langchain_openai import OpenAI
@@ -24,6 +25,9 @@ load_dotenv()
 # Configuration
 MCP_SERVER_URL = "http://localhost:8080/mcp/message"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+HTTP_PROXY = os.getenv("HTTP_PROXY")
+HTTPS_PROXY = os.getenv("HTTPS_PROXY")
+
 
 
 class MCPAgent:
@@ -41,12 +45,38 @@ class MCPAgent:
                 "capitalisation.*\n\n"
                 "Available tools: {tools}\n\n"
                 "Task:\n{task}\n\n"
-                "Return a JSON array; for example:\n"
-                "[{{\"name\": \"saveClientInfo\", \"input\": {{}}}}]\n"
+                "Each tool call must include both 'name' and 'input' fields. The input must be a map object.\n"
+                "For any operation involving client information, wrap the parameters inside a 'clientInfo' object.\n\n"
+                "Examples for different tools:\n"
+                "1. For saveClientInfo:\n"
+                "{{\"name\": \"saveClientInfo\", \"input\": {{\"clientInfo\": {{\"name\": \"Client Name\", \"email\": \"client@email.com\"}}}}}}\n\n"
+                "2. For qaVerify:\n"
+                "{{\"name\": \"qaVerify\", \"input\": {{\"clientInfo\": {{\"clientId\": \"123\", \"status\": \"pending\"}}}}}}\n\n"
+                "3. For approve:\n"
+                "{{\"name\": \"approve\", \"input\": {{\"clientInfo\": {{\"clientId\": \"123\", \"action\": \"approve\"}}}}}}\n\n"
+                "Return a JSON array of tool calls; for example:\n"
+                "[{{\"name\": \"saveClientInfo\", \"input\": {{\"clientInfo\": {{\"name\": \"Test Client\", \"email\": \"test@email.com\"}}}}}},\n"
+                " {{\"name\": \"qaVerify\", \"input\": {{\"clientInfo\": {{\"clientId\": \"123\", \"status\": \"pending\"}}}}}},\n"
+                " {{\"name\": \"approve\", \"input\": {{\"clientInfo\": {{\"clientId\": \"123\", \"action\": \"approve\"}}}}}}]\n"
                 "Do **not** add commentary or markdown."
             ),
         )
-        self.llm = OpenAI(api_key=OPENAI_API_KEY, temperature=0)
+        
+        # Configure OpenAI with proxy settings
+        openai_config = {
+            "api_key": OPENAI_API_KEY,
+            "temperature": 0
+        }
+        
+        # Add proxy settings only if they exist
+        if HTTP_PROXY or HTTPS_PROXY:
+            transport = httpx.HTTPTransport(
+                proxy=HTTPS_PROXY or HTTP_PROXY,
+                verify=True  # Set to False if you have SSL certificate issues
+            )
+            openai_config["http_client"] = httpx.Client(transport=transport)
+                
+        self.llm = OpenAI(**openai_config)
         self.planner = LLMChain(llm=self.llm, prompt=plan_prompt)
 
     # ------------------------------------------------------------------ #
@@ -54,7 +84,7 @@ class MCPAgent:
     # ------------------------------------------------------------------ #
     def _ensure_session(self) -> None:
         """
-        Spring AI MCP keeps an `SseEmitter` open at **GET /sse** (root path).
+        Spring AI MCP keeps an `SseEmitter` open at **GET /sse** (root path).
         We create one connection and reuse it for all JSON‑RPC calls.
         """
         if hasattr(self, "_sse_client"):
@@ -64,7 +94,15 @@ class MCPAgent:
 
         parts = urlsplit(self.mcp_url)
         sse_url = f"{parts.scheme}://{parts.netloc}/sse"
-        resp = requests.get(
+        
+        # Create a session without proxy for MCP server
+        session = requests.Session()
+        if HTTP_PROXY or HTTPS_PROXY:
+            session.proxies = {
+                "no_proxy": "localhost,127.0.0.1"  # Don't use proxy for localhost
+            }
+            
+        resp = session.get(
             sse_url,
             headers={"Accept": "text/event-stream"},
             stream=True,
@@ -87,7 +125,15 @@ class MCPAgent:
         self._ensure_session()
         req_id = str(uuid.uuid4())
         payload = {"jsonrpc": "2.0", "method": method, "id": req_id, "params": params}
-        requests.post(self.mcp_url, json=payload, timeout=30).raise_for_status()
+        
+        # Create a session without proxy for MCP server
+        session = requests.Session()
+        if HTTP_PROXY or HTTPS_PROXY:
+            session.proxies = {
+                "no_proxy": "localhost,127.0.0.1"  # Don't use proxy for localhost
+            }
+            
+        session.post(self.mcp_url, json=payload, timeout=30).raise_for_status()
 
         for event in self._sse_client.events():
             if not event.data:
@@ -118,7 +164,15 @@ class MCPAgent:
             }
         )
         print("Sending request:", json.dumps(request, indent=2))
-        response = requests.post(self.mcp_url, json=request, stream=True)
+        
+        # Create a session without proxy for MCP server
+        session = requests.Session()
+        if HTTP_PROXY or HTTPS_PROXY:
+            session.proxies = {
+                "no_proxy": "localhost,127.0.0.1"  # Don't use proxy for localhost
+            }
+            
+        response = session.post(self.mcp_url, json=request, stream=True)
         response.raise_for_status()
         print("Received response status:", response.status_code)
 
@@ -146,14 +200,48 @@ class MCPAgent:
         # Generate a plan
         plan_json = self.planner.run(tools=tool_names, task=task)
         print("\nRaw plan from LLM:", plan_json)
-
+        
         try:
             plan = json.loads(plan_json)
             if not isinstance(plan, list):
                 raise ValueError("Plan must be a JSON array")
+                
+            # Validate that each step has the correct structure
+            for step in plan:
+                if not isinstance(step, dict):
+                    raise ValueError(f"Step must be a dictionary, got {type(step)}")
+                if "name" not in step:
+                    raise ValueError("Step must include 'name' field")
+                if "input" not in step:
+                    raise ValueError("Step must include 'input' field")
+                if not isinstance(step["input"], dict):
+                    raise ValueError("Input must be a map object")
+                
+                # Validate that client-related operations use clientInfo wrapper
+                if step["name"] in ["saveClientInfo", "qaVerify", "approve"]:
+                    client_info = step["input"].get("clientInfo", {})
+                    if not client_info or not isinstance(client_info, dict):
+                        raise ValueError(f"Operation {step['name']} must include parameters in a 'clientInfo' map")
+                    
+                    # Specific validation for saveClientInfo
+                    if step["name"] == "saveClientInfo":
+                        if not client_info.get("name") or not client_info.get("email"):
+                            raise ValueError("Client name and email must be provided in the clientInfo map")
+                    # Specific validation for qaVerify
+                    elif step["name"] == "qaVerify":
+                        if not client_info.get("clientId"):
+                            raise ValueError("Client ID must be provided in the clientInfo map for qaVerify")
+                    # Specific validation for approve
+                    elif step["name"] == "approve":
+                        if not client_info.get("clientId"):
+                            raise ValueError("Client ID must be provided in the clientInfo map for approve")
+                
         except json.JSONDecodeError as e:
             print(f"Error parsing plan JSON: {e}")
             print("Please ensure the LLM returns a valid JSON array")
+            return
+        except ValueError as e:
+            print(f"Error in plan validation: {e}")
             return
 
         # Execute each step
@@ -161,7 +249,7 @@ class MCPAgent:
             if not isinstance(step, dict) or "name" not in step or "input" not in step:
                 print(f"Invalid step format: {step}")
                 continue
-
+                
             name = step["name"]
             inp = step["input"]
             print(f"\n>>> Calling {name} with {inp}")
