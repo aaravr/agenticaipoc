@@ -1,6 +1,11 @@
 # requirements.txt
+langchain>=0.1.0
+langchain-core>=0.1.0
 langchain-openai>=0.0.2
-langchain-community>=0.0.10
-langgraph>=0.0.10
-requests>=2.31.0
+langgraph>=0.0.15
+openai>=1.0.0
 python-dotenv>=1.0.0
+requests>=2.31.0
+httpx>=0.25.0
+sseclient-py>=1.7.2
+fastmcp==0.1.0

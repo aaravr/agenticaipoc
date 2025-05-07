@@ -1,6 +1,6 @@
 # main.py
 from src.workflow.orchestrator import WorkflowOrchestrator
-from src.services.mock_service import MockService
+from src.services.mcp_service import MCPService
 import os
 from dotenv import load_dotenv
 
@@ -13,8 +13,8 @@ def main():
     if not os.getenv("OPENAI_API_KEY"):
         raise ValueError("OPENAI_API_KEY environment variable is not set")
 
-    # Initialize mock service and add sample client
-    mock_service = MockService()
+    # Initialize MCP service and add sample client
+    mcp_service = MCPService()
     sample_client = {
         "name": "John Doe",
         "email": "john@example.com",
@@ -23,12 +23,12 @@ def main():
     }
     
     # Add the sample client and store its ID
-    client_id = mock_service.add_sample_client(sample_client)
+    client_id = mcp_service.add_sample_client(sample_client)
     print(f"Created sample client with ID: {client_id}")
 
     try:
-        # Pass the mock_service instance to the orchestrator
-        orchestrator = WorkflowOrchestrator(mock_service=mock_service)
+        # Pass the mcp_service instance to the orchestrator
+        orchestrator = WorkflowOrchestrator(mcp_service=mcp_service)
         orchestrator.execute_workflow(client_id)
     except Exception as e:
         print(f"Main error: {str(e)}")

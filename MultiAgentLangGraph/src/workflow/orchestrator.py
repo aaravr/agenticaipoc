@@ -7,74 +7,41 @@ from src.services.memory import WorkflowMemory
 from src.agents.outreach_agent import OutreachAgent
 from src.agents.qa_agent import QAAgent
 from src.agents.approval_agent import ApprovalAgent
-from src.services.mock_service import MockService
+from src.services.mcp_service import MCPService
 
 
 class WorkflowOrchestrator:
-    def __init__(self, mock_service: MockService = None):
-        # Use provided mock service or create new one
-        self.mock_service = mock_service or MockService()
-        # Initialize agents with the same mock service instance
-        self.outreach_agent = OutreachAgent(mock_service=self.mock_service)
-        self.qa_agent = QAAgent(mock_service=self.mock_service)
-        self.approval_agent = ApprovalAgent(mock_service=self.mock_service)
+    def __init__(self, mcp_service: MCPService = None):
+        # Use provided MCP service or create new one
+        self.mcp_service = mcp_service or MCPService()
+        # Initialize agents with the same MCP service instance
+        self.outreach_agent = OutreachAgent(mcp_service=self.mcp_service)
+        self.qa_agent = QAAgent(mcp_service=self.mcp_service)
+        self.approval_agent = ApprovalAgent(mcp_service=self.mcp_service)
 
     def create_workflow(self) -> Graph:
+        # Create the workflow graph
         workflow = StateGraph(AgentStateDict)
 
-        def route_next(state: Dict[str, Any]) -> str:
-            return state["status"]
+        # Define the nodes
+        workflow.add_node("outreach", self.outreach_agent.process)
+        workflow.add_node("qa", self.qa_agent.process)
+        workflow.add_node("approval", self.approval_agent.process)
 
-        # Wrap agent process methods to handle dict conversion
-        def wrap_agent_process(agent_method):
-            def wrapped(state_dict: Dict[str, Any]) -> Dict[str, Any]:
-                state = AgentState.from_dict(state_dict)
-                result = agent_method(state)
-                return result.to_dict()
+        # Define the edges
+        workflow.add_edge("outreach", "qa")
+        workflow.add_edge("qa", "approval")
+        workflow.add_edge("approval", "end")
 
-            return wrapped
-
-        # Add nodes with wrapped process methods
-        workflow.add_node("outreach", wrap_agent_process(self.outreach_agent.process))
-        workflow.add_node("qa", wrap_agent_process(self.qa_agent.process))
-        workflow.add_node("approval", wrap_agent_process(self.approval_agent.process))
-        workflow.add_node("end", lambda x: x)
-
-        # Add edges
-        workflow.add_conditional_edges(
-            "outreach",
-            route_next,
-            {
-                ClientStatus.READY_FOR_QA.value: "qa",
-                ClientStatus.INFORMATION_GATHERING.value: "outreach"
-            }
-        )
-
-        workflow.add_conditional_edges(
-            "qa",
-            route_next,
-            {
-                ClientStatus.READY_FOR_APPROVAL.value: "approval",
-                ClientStatus.INFORMATION_GATHERING.value: "outreach"
-            }
-        )
-
-        workflow.add_conditional_edges(
-            "approval",
-            route_next,
-            {
-                ClientStatus.COMPLETED.value: "end",
-                ClientStatus.READY_FOR_QA.value: "qa"
-            }
-        )
-
+        # Set the entry point
         workflow.set_entry_point("outreach")
 
+        # Compile the workflow
         return workflow.compile()
 
     def execute_workflow(self, client_id: str):
         # Lookup client info before starting workflow
-        lookup_result = self.mock_service.get_client_info(client_id)
+        lookup_result = self.mcp_service.get_client_info(client_id)
         if "error" in lookup_result:
             raise ValueError(f"Failed to lookup client info: {lookup_result['error']}")
 

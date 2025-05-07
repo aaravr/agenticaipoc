@@ -1,12 +1,12 @@
 # src/agents/approval_agent.py
 from src.agents.base import BaseAgent
 from src.models.types import AgentState, ClientStatus
-from src.services.mock_service import MockService
+from src.services.mcp_service import MCPService
 
 
 class ApprovalAgent(BaseAgent):
-    def __init__(self, mock_service: MockService):
-        super().__init__("approval_agent", mock_service)
+    def __init__(self, mcp_service: MCPService):
+        super().__init__("approval_agent", mcp_service)
 
     def process(self, state: AgentState) -> AgentState:
         try:
