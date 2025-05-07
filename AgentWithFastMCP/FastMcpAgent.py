@@ -29,6 +29,7 @@ HTTP_PROXY = os.getenv("HTTP_PROXY")
 HTTPS_PROXY = os.getenv("HTTPS_PROXY")
 
 
+
 class MCPAgent:
     def __init__(self, mcp_url: str = MCP_SERVER_URL):
         self.mcp_url = mcp_url
@@ -188,7 +189,7 @@ class MCPAgent:
         # Generate a plan
         plan_json = self.planner.run(tools=tool_names, task=task)
         print("\nRaw plan from LLM:", plan_json)
-        
+
         try:
             plan = json.loads(plan_json)
             if not isinstance(plan, list):
@@ -203,7 +204,7 @@ class MCPAgent:
             if not isinstance(step, dict) or "name" not in step or "input" not in step:
                 print(f"Invalid step format: {step}")
                 continue
-                
+
             name = step["name"]
             inp = step["input"]
             print(f"\n>>> Calling {name} with {inp}")
@@ -228,7 +229,7 @@ def main():
         print("Example .env file content:")
         print("OPENAI_API_KEY=your_actual_openai_api_key_here")
         return
-    
+
     agent = MCPAgent()
     task = "Onboard client with data name=Test client, email=test@email.com. You need to first create the client, then complete QA verification and  then approve the case using approval task"
     agent.execute_task(task)
