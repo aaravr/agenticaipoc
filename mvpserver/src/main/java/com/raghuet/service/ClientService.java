@@ -1,5 +1,7 @@
 package com.raghuet.service;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.raghuet.ClientRepository;
 import com.raghuet.exception.ClientNotFoundException;
 import com.raghuet.model.ApprovalStatus;
@@ -13,7 +15,9 @@ import org.springframework.transaction.annotation.Transactional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Collections;
 import java.util.List;
+import java.util.UUID;
 
 @Service
 public class ClientService {
@@ -24,6 +28,13 @@ public class ClientService {
 
     @Autowired
     private ClientRepository clientRepository;
+
+    List<String> tasks =
+            List.of("TASK_1_010", "TASK_1_035", "TASK_1_040", "TASK_1_050", "TASK_1_070", "TASK_1_085", "TASK_1_090");
+
+    List<TaskDetail>  details =  tasks.stream().map(s -> TaskDetail.builder()
+            .taskId(UUID.randomUUID().toString())
+            .taskKey(s).status("Unavailable").build()).toList();
 
     @Tool(name="saveClientInfo", description = "Save or create new client details")
 //    @Transactional
@@ -37,7 +48,7 @@ public class ClientService {
                    clientInfo.getName(), clientInfo.getEmail(), 
                    clientInfo.getPhone(), clientInfo.getCompany());
         
-        clientInfo.setStatus(ClientStatus.NEW);
+        clientInfo.setStatus(ClientStatus.READY_FOR_QA);
         clientInfo.setQaStatus(QAStatus.NOT_STARTED);
         clientInfo.setApprovalStatus(ApprovalStatus.NOT_STARTED);
         return clientRepository.save(clientInfo);
@@ -58,7 +69,8 @@ public class ClientService {
         existingInfo.setRequirements(updatedInfo.getRequirements());
 
         existingInfo.setStatus(ClientStatus.READY_FOR_QA);
-        return clientRepository.save(existingInfo);
+        clientRepository.save(existingInfo);
+        return existingInfo;
     }
 
     @Tool(name="qaVerify", description = "complete QA verification task")
@@ -67,14 +79,16 @@ public class ClientService {
         ClientInfo existingInfo = clientRepository.findById(clientInfo.getId())
                 .orElseThrow(() -> new ClientNotFoundException("Client not found"));
 
-        existingInfo.setQaStatus(clientInfo.getQaStatus());
+        //existingInfo.setQaStatus(clientInfo.getQaStatus());
+        clientInfo.setApprovalStatus(ApprovalStatus.QA_VERIFIED);
 
-        if (clientInfo.getQaStatus() == QAStatus.APPROVED) {
-            existingInfo.setStatus(ClientStatus.READY_FOR_APPROVAL);
-        } else if (clientInfo.getQaStatus() == QAStatus.REJECTED) {
-            existingInfo.setStatus(ClientStatus.INFORMATION_GATHERING);
-        }
-        return clientRepository.save(existingInfo);
+//       if (clientInfo.getQaStatus() == QAStatus.APPROVED) {
+//             existingInfo.setStatus(ClientStatus.READY_FOR_APPROVAL);
+//        } else if (clientInfo.getQaStatus() == QAStatus.REJECTED) {
+//            existingInfo.setStatus(ClientStatus.INFORMATION_GATHERING);
+//        }
+        // clientRepository.save(existingInfo);
+        return clientInfo;
     }
 
     @Tool(name="approve", description = "Case approval task for approver")
@@ -83,7 +97,7 @@ public class ClientService {
         ClientInfo existingInfo = clientRepository.findById(clientInfo.getId())
                 .orElseThrow(() -> new ClientNotFoundException("Client not found"));
 
-        existingInfo.setApprovalStatus(clientInfo.getApprovalStatus());
+        clientInfo.setApprovalStatus(ApprovalStatus.QA_VERIFIED);
 
         if (clientInfo.getApprovalStatus() == ApprovalStatus.APPROVED) {
             existingInfo.setStatus(ClientStatus.APPROVED);
@@ -91,8 +105,10 @@ public class ClientService {
             existingInfo.setStatus(ClientStatus.READY_FOR_QA);
             existingInfo.setQaStatus(QAStatus.NOT_STARTED);
         }
+        existingInfo.setApprovalStatus(ApprovalStatus.APPROVED);
 
-        return clientRepository.save(existingInfo);
+        clientRepository.save(existingInfo);
+        return clientInfo;
     }
 
     @Tool(name="getClientInfo", description = "get client details by id")
@@ -102,7 +118,41 @@ public class ClientService {
                 .orElseThrow(() -> new ClientNotFoundException("Client not found"));
     }
 
+    @Tool(name = "getTaskDetails", description = "get task details")
+    public List<TaskDetail> getTaskDetails(TaskDetailRequest taskDetailRequest) throws JsonProcessingException {
+        return getTaskDetails();
+    }
+
+    @Tool(name = "claimTask", description = "claim a task")
+    public void claimTask(ClaimRequest claimRequest) {
+        logger.info(" Task id for claiming {}", claimRequest.taskId);
+    }
+
+    @Tool(name = "completeTask", description = "complete a task")
+    public void completeTask(CompleteRequest completeRequest) {
+        logger.info(" Task id for completed {}", completeRequest.getTaskId());
+        for (TaskDetail task : details) {
+            if ("Open".equals(task.getStatus()) && task.getTaskId().equals(completeRequest.getTaskId())) {
+                task.setStatus("Complete");
+                break; // stop after updating the first one
+            }
+        }
+    }
+
     public List<ClientInfo> getClientsByStatus(ClientStatus status) {
         return clientRepository.findAll();
+    }
+
+
+    private List<TaskDetail> getTaskDetails() {
+        for (TaskDetail task : details) {
+            if ("Open".equals(task.getStatus())) {
+                return details;
+            } else if ("Unavailable".equals(task.getStatus())) {
+                task.setStatus("Open");
+                return details;
+            }
+        }
+        return details;
     }
 }

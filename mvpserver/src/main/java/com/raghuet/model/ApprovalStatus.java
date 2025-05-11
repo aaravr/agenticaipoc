@@ -4,5 +4,6 @@ public enum ApprovalStatus {
     NOT_STARTED,
     IN_PROGRESS,
     APPROVED,
-    REJECTED
+    REJECTED,
+    QA_VERIFIED
 }

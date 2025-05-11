@@ -6,10 +6,13 @@ import org.springframework.ai.tool.method.MethodToolCallbackProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.stereotype.Service;
+import org.springframework.context.annotation.Primary;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Configuration
 public class MCPConfig {
+    private static final Logger logger = LoggerFactory.getLogger(MCPConfig.class);
 
     private final ClientService clientService;
 
@@ -19,11 +22,11 @@ public class MCPConfig {
     }
 
     @Bean
+    @Primary
     ToolCallbackProvider userTools() {
         return MethodToolCallbackProvider
                 .builder()
                 .toolObjects(clientService)
                 .build();
     }
-
 }
