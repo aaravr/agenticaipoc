@@ -5,11 +5,12 @@ import uuid
 import httpx
 from typing import List, Dict, Any, Optional
 from sseclient import SSEClient
-from langchain_openai import OpenAI
-from langchain.memory import ConversationBufferMemory
+from langchain_openai import ChatOpenAI
+from langchain.memory import ConversationBufferWindowMemory
 from langchain_core.prompts import PromptTemplate
 from dotenv import load_dotenv
 import logging
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -27,73 +28,62 @@ HTTPS_PROXY = os.getenv("HTTPS_PROXY")
 class OnboardingAgent:
     def __init__(self, mcp_url: str = MCP_SERVER_URL):
         self.mcp_url = mcp_url
-        self.memory = ConversationBufferMemory(memory_key="history", return_messages=True)
+        self.memory = ConversationBufferWindowMemory(
+            memory_key="history",
+            return_messages=True,
+            output_key="output",
+            k=1  # Only keep last message
+        )
         self._setup_planner()
         self._session = None
         self._sse_client = None
         self._last_response = None
+        self._current_task = None
+        self._processed_tasks = set()
 
     def _setup_planner(self):
         plan_prompt = PromptTemplate(
-            input_variables=["tools", "task", "last_response"],
+            input_variables=["tools", "task", "last_response", "history"],
             template=(
-                "You are an onboarding workflow planner. Choose tool names **only** from the "
-                "comma‑separated list below. *Never invent new names or change "
-                "capitalisation.*\n\n"
-                "Available tools: {tools}\n\n"
+                "You are an onboarding workflow planner. Use tools from: {tools}\n\n"
                 "Task:\n{task}\n\n"
                 "Last Response:\n{last_response}\n\n"
-                "IMPORTANT RULES:\n"
-                "1. Each tool call must include both 'name' and 'input' fields.\n"
-                "2. The input must be a map object.\n"
-                "3. For getTaskDetails, use taskDetailRequest with taskId in the input.\n"
-                "4. For claimTask, use taskId from the getTaskDetails response.\n"
-                "5. For completeTask, use taskId and taskKey from the getTaskDetails response.\n"
-                "6. CRITICAL: For EACH Open task, you MUST follow this EXACT sequence:\n"
-                "   a. getTaskDetails to get the task\n"
-                "   b. claimTask to claim the Open task\n"
-                "   c. completeTask to complete the claimed task\n"
-                "   d. getTaskDetails again to check for more tasks\n"
-                "7. CRITICAL: Never skip any step in the sequence for any Open task.\n"
-                "8. CRITICAL: Only process tasks with status='Open'. Skip any tasks with other statuses.\n"
-                "9. CRITICAL: The task status is in the getTaskDetails response. Check it before claiming.\n"
-                "10. CRITICAL: If no Open tasks are found, the workflow is complete.\n"
-                "11. CRITICAL: Pay attention to taskKey in the response. Different task types require different payloads:\n"
-                "    - For TASK_1_070: Use this EXACT payload structure:\n"
-                "      {{\"completeRequest\": {{\n"
-                "        \"taskId\": \"[TASK-ID]\",\n"
-                "        \"taskKey\": \"TASK_1_070\",\n"
-                "        \"skipBsOutreach\": true,\n"
-                "        \"skipBsOutreachComment\": \"Skipping outreach as per workflow requirements\",\n"
-                "        \"outcomeVariable\": {{\n"
-                "          \"prepareBsOutreachOutcome\": {{\n"
-                "            \"label\": \"Skip Outreach\",\n"
-                "            \"action\": \"skipOutreach\"\n"
-                "          }}\n"
-                "        }}\n"
-                "      }}}}\n"
-                "    - For all other tasks: Use standard taskAction payload:\n"
-                "      {{\"completeRequest\": {{\n"
-                "        \"taskId\": \"[TASK-ID]\",\n"
-                "        \"taskKey\": \"[TASK-KEY]\",\n"
-                "        \"taskAction\": {{\"label\": \"Complete\", \"action\": \"complete\"}}\n"
-                "      }}}}\n"
-                "12. CRITICAL: Always check the taskKey before constructing the completeTask payload\n"
-                "13. CRITICAL: For TASK_1_070, NEVER use taskAction. Use the skipBsOutreach structure instead.\n\n"
-                "Tool Call Sequence (REPEAT for EACH Open task):\n"
-                "1. getTaskDetails: Get all tasks for a case\n"
-                "2. Check task status in response:\n"
-                "   - If status='Open': Process the task\n"
-                "   - If status≠'Open': Skip and check next task\n"
-                "3. For EACH Open task:\n"
-                "   a. claimTask: Claim the task\n"
-                "   b. completeTask: Complete the claimed task with appropriate payload based on taskKey\n"
-                "   c. getTaskDetails: Check for more tasks\n"
-                "4. If no more Open tasks, the workflow is complete\n\n"
-                "Example Response Format:\n"
+                "Previous Actions:\n{history}\n\n"
+                "CRITICAL RULES:\n"
+                "1. Each tool call must have 'name' and 'input' fields.\n"
+                "2. For getTaskDetails: use taskDetailRequest with taskId\n"
+                "3. For claimTask: use taskId from getTaskDetails response\n"
+                "4. For completeTask: use taskId and taskKey from getTaskDetails\n"
+                "5. For TASK_1_070, use this EXACT payload:\n"
+                "{{\"completeRequest\": {{\n"
+                "  \"taskId\": \"[TASK-ID]\",\n"
+                "  \"taskKey\": \"TASK_1_070\",\n"
+                "  \"skipBsOutreach\": true,\n"
+                "  \"skipBsOutreachComment\": \"Skipping outreach as per workflow requirements\",\n"
+                "  \"outcomeVariable\": {{\n"
+                "    \"prepareBsOutreachOutcome\": {{\n"
+                "      \"label\": \"Skip Outreach\",\n"
+                "      \"action\": \"skipOutreach\"\n"
+                "    }}\n"
+                "  }}\n"
+                "}}}}\n"
+                "6. For other tasks, use standard payload:\n"
+                "{{\"completeRequest\": {{\n"
+                "  \"taskId\": \"[TASK-ID]\",\n"
+                "  \"taskKey\": \"[TASK-KEY]\",\n"
+                "  \"taskAction\": {{\"label\": \"Complete\", \"action\": \"complete\"}}\n"
+                "}}}}\n"
+                "7. NEVER use taskAction for TASK_1_070\n"
+                "8. Check history to avoid processing same task twice\n\n"
+                "Tool Call Sequence:\n"
+                "1. getTaskDetails\n"
+                "2. claimTask (if status='Open')\n"
+                "3. completeTask (with appropriate payload)\n"
+                "4. getTaskDetails (check for more tasks)\n\n"
+                "Example Response:\n"
                 "[\n"
                 "  {{\"name\": \"getTaskDetails\", \"input\": {{\"taskDetailRequest\": {{\"taskId\": \"CAS-123\"}}}}}},\n"
-                "  {{\"name\": \"claimTask\", \"input\": {{\"claimRequest\": {{\"taskId\": \"[TASK-ID-FROM-GETTASKDETAILS]\"}}}}}},\n"
+                "  {{\"name\": \"claimTask\", \"input\": {{\"claimRequest\": {{\"taskId\": \"[TASK-ID]\"}}}}}},\n"
                 "  {{\"name\": \"completeTask\", \"input\": {{\"completeRequest\": {{\"taskId\": \"[TASK-ID]\", \"taskKey\": \"[TASK-KEY]\", \"taskAction\": {{\"label\": \"Complete\", \"action\": \"complete\"}}}}}}}},\n"
                 "  {{\"name\": \"getTaskDetails\", \"input\": {{\"taskDetailRequest\": {{\"taskId\": \"CAS-123\"}}}}}}\n"
                 "]\n"
@@ -104,6 +94,7 @@ class OnboardingAgent:
         # Configure OpenAI with proxy settings
         openai_config = {
             "api_key": OPENAI_API_KEY,
+            "model": "gpt-4-turbo",
             "temperature": 0
         }
         
@@ -115,8 +106,53 @@ class OnboardingAgent:
             )
             openai_config["http_client"] = httpx.Client(transport=transport)
                 
-        self.llm = OpenAI(**openai_config)
+        self.llm = ChatOpenAI(**openai_config)
         self.planner = plan_prompt | self.llm
+
+    def _truncate_json(self, data: Any, max_length: int = 1000) -> Any:
+        """Truncate long JSON responses while preserving structure."""
+        if isinstance(data, dict):
+            return {k: self._truncate_json(v, max_length) for k, v in data.items()}
+        elif isinstance(data, list):
+            return [self._truncate_json(item, max_length) for item in data]
+        elif isinstance(data, str):
+            if len(data) > max_length:
+                return data[:max_length] + "..."
+            return data
+        return data
+
+    def _summarize_task_details(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a minimal summary of task details."""
+        return {
+            "taskId": task_details.get("taskId"),
+            "taskKey": task_details.get("taskKey"),
+            "status": task_details.get("status")
+        }
+
+    def _save_to_memory(self, action: str, details: Dict[str, Any]) -> None:
+        """Save action and details to memory with truncation."""
+        # Truncate details before saving
+        truncated_details = self._truncate_json(details)
+        
+        memory_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "step": len(self._processed_tasks) + 1,
+            "action": action,
+            **truncated_details
+        }
+        
+        self.memory.save_context(
+            {"input": f"Action: {action}"},
+            {"output": json.dumps(memory_entry)}
+        )
+        
+        if action == "task_processed":
+            self._processed_tasks.add(details.get("taskId"))
+            logger.info(f"Task {details.get('taskId')} processed and saved to memory")
+
+    def _is_task_processed(self, task_id: str) -> bool:
+        """Check if a task has already been processed."""
+        return task_id in self._processed_tasks
 
     def _ensure_session(self) -> None:
         """Ensure SSE subscription is active."""
@@ -249,7 +285,11 @@ class OnboardingAgent:
                     "taskId": case_id
                 }
             })
-            logger.info(f"GetTaskDetails response: {json.dumps(get_task_details_result, indent=2)}")
+            
+            # Truncate task details
+            truncated_result = self._truncate_json(get_task_details_result)
+            logger.info(f"GetTaskDetails response: {json.dumps(truncated_result, indent=2)}")
+            self._save_to_memory("get_task_details", {"caseId": case_id, "result": truncated_result})
 
             # Handle task details response
             tasks = []
@@ -271,14 +311,15 @@ class OnboardingAgent:
                 logger.info("No more tasks found, workflow complete")
                 break
 
-            # Find first Open task
+            # Find first Open task that hasn't been processed
             open_task = None
             for task in tasks:
-                if task.get("status") == "Open":
+                task_id = task.get("taskId")
+                if task.get("status") == "Open" and not self._is_task_processed(task_id):
                     open_task = task
                     break
                 else:
-                    logger.info(f"Skipping task {task.get('taskId')} with status '{task.get('status')}'")
+                    logger.info(f"Skipping task {task_id} with status '{task.get('status')}'")
 
             if not open_task:
                 logger.info("No more Open tasks found, workflow complete")
@@ -292,7 +333,57 @@ class OnboardingAgent:
                 logger.error("Missing taskId or taskKey in task details")
                 raise RuntimeError("Invalid task details response")
 
-            logger.info(f"\nProcessing Open task: {json.dumps(open_task, indent=2)}")
+            # Use truncated task details
+            truncated_task = self._truncate_json(open_task)
+            logger.info(f"\nProcessing Open task: {json.dumps(truncated_task, indent=2)}")
+            self._current_task = truncated_task
+
+            # Let LLM determine the correct payload structure
+            task_description = f"Complete task with ID {task_id} and key {task_key}"
+            logger.info("\nGetting LLM plan for task completion...")
+            
+            # Use JSON-safe memory history for LLM input
+            llm_history = self.get_memory_history()
+            llm_input = {
+                "tools": tool_names,
+                "task": task_description,
+                "last_response": json.dumps(truncated_task),
+                "history": llm_history
+            }
+            
+            # Get LLM plan and extract content from AIMessage
+            llm_response = self.planner.invoke(llm_input)
+            plan = json.loads(llm_response.content) if hasattr(llm_response, 'content') else llm_response
+            
+            # Log raw LLM input and output
+            logger.info("\nLLM Input:")
+            logger.info(json.dumps(llm_input, indent=2))
+            logger.info("\nLLM Output (Plan):")
+            logger.info(json.dumps(plan, indent=2))
+            
+            # Save LLM interaction to memory (JSON-safe)
+            self._save_to_memory("llm_interaction", {
+                "taskId": task_id,
+                "taskKey": task_key,
+                "input": llm_input,
+                "output": plan
+            })
+
+            # Extract the completeTask payload from the plan
+            complete_payload = {
+                "completeRequest": {
+                    "taskId": task_id,
+                    "taskKey": task_key
+                }
+            }
+
+            if isinstance(plan, list):
+                for tool_call in plan:
+                    if isinstance(tool_call, dict) and tool_call.get("name") == "completeTask":
+                        complete_payload = tool_call.get("input", complete_payload)
+                        logger.info("\nSelected payload from LLM plan:")
+                        logger.info(json.dumps(complete_payload, indent=2))
+                        break
 
             # Claim the task
             logger.info("\nClaiming task...")
@@ -306,37 +397,23 @@ class OnboardingAgent:
                not any(item.get("text") == "Done" for item in claim_result.get("content", [])):
                 raise RuntimeError("Failed to claim task")
             logger.info("Task claimed successfully")
+            self._save_to_memory("task_claimed", {"taskId": task_id, "result": claim_result})
 
             # Complete the task with appropriate payload based on taskKey
             logger.info("\nCompleting task...")
-            complete_payload = {
-                "completeRequest": {
-                    "taskId": task_id,
-                    "taskKey": task_key
-                }
-            }
-
-            # Let LLM determine the correct payload structure
-            task_description = f"Complete task with ID {task_id} and key {task_key}"
-            plan = self.planner.invoke({
-                "tools": tool_names,
-                "task": task_description,
-                "last_response": json.dumps(open_task)
-            })
-
-            # Extract the completeTask payload from the plan
-            if isinstance(plan, list):
-                for tool_call in plan:
-                    if isinstance(tool_call, dict) and tool_call.get("name") == "completeTask":
-                        complete_payload = tool_call.get("input", complete_payload)
-                        break
-
             complete_result = self.call_tool("completeTask", complete_payload)
             # Check if complete was successful (no error and content contains "Done")
             if not isinstance(complete_result, dict) or complete_result.get("isError", True) or \
                not any(item.get("text") == "Done" for item in complete_result.get("content", [])):
                 raise RuntimeError("Failed to complete task")
             logger.info("Task completed successfully")
+            self._save_to_memory("task_completed", {
+                "taskId": task_id,
+                "taskKey": task_key,
+                "payload": complete_payload,
+                "result": complete_result
+            })
+            self._save_to_memory("task_processed", {"taskId": task_id})
 
             logger.info(f"\nCompleted task {task_id}, checking for more tasks...")
 
@@ -351,6 +428,102 @@ class OnboardingAgent:
         if self._sse_client:
             self._sse_client.close()
 
+    def get_memory_history(self) -> List[Dict[str, Any]]:
+        """Get the complete memory history as a list of actions and their details."""
+        memory_vars = self.memory.load_memory_variables({})
+        history = []
+
+        for message in memory_vars.get("history", []):
+            # Convert message object to dict or string
+            if hasattr(message, "content"):
+                try:
+                    content = json.loads(message.content)
+                    history.append(content)
+                except Exception:
+                    # If not JSON, add as string
+                    history.append({"content": str(message.content)})
+            else:
+                # If message is not an object with 'content', just add its string representation
+                history.append({"content": str(message)})
+        return history
+
+    def make_json_safe(self, obj):
+        if isinstance(obj, (str, int, float, bool, type(None))):
+            return obj
+        if isinstance(obj, dict):
+            return {k: self.make_json_safe(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [self.make_json_safe(i) for i in obj]
+        # For LangChain message objects
+        if hasattr(obj, 'content'):
+            return str(obj.content)
+        return str(obj)
+
+    def get_processed_tasks(self) -> List[str]:
+        """Get list of all processed task IDs."""
+        return list(self._processed_tasks)
+
+    def get_task_history(self, task_id: str) -> List[Dict[str, Any]]:
+        """Get the complete history of actions for a specific task."""
+        history = self.get_memory_history()
+        task_history = []
+        
+        for entry in history:
+            if isinstance(entry, dict) and entry.get("taskId") == task_id:
+                task_history.append(entry)
+        
+        return task_history
+
+    def get_case_summary(self, case_id: str) -> Dict[str, Any]:
+        """Get a summary of all actions taken for a case."""
+        history = self.get_memory_history()
+        summary = {
+            "caseId": case_id,
+            "totalTasks": len(self._processed_tasks),
+            "processedTasks": self.get_processed_tasks(),
+            "steps": []
+        }
+        
+        for entry in history:
+            if isinstance(entry, dict):
+                step = {
+                    "step": entry.get("step", 0),
+                    "action": entry.get("action", "unknown"),
+                    "timestamp": entry.get("timestamp", None),
+                    "taskId": entry.get("taskId", None),
+                    "taskKey": entry.get("taskKey", None),
+                    "details": entry
+                }
+                summary["steps"].append(step)
+        
+        # Sort steps by step number
+        summary["steps"].sort(key=lambda x: x["step"])
+        return summary
+
+    def export_memory_to_file(self, filepath: str) -> None:
+        """Export the complete memory history to a JSON file."""
+        memory_data = {
+            "processed_tasks": self.get_processed_tasks(),
+            "history": self.get_memory_history(),
+            "current_task": self._current_task,
+            "summary": self.get_case_summary(self._current_task.get("caseId") if self._current_task else "unknown")
+        }
+        
+        with open(filepath, 'w') as f:
+            json.dump(self.make_json_safe(memory_data), f, indent=2)
+        
+        logger.info(f"Memory exported to {filepath}")
+        logger.info(f"Total steps recorded: {len(memory_data['history'])}")
+        logger.info(f"Total tasks processed: {len(memory_data['processed_tasks'])}")
+
+    def clear_memory(self) -> None:
+        """Clear all memory and reset the agent's state."""
+        self.memory.clear()
+        self._processed_tasks.clear()
+        self._current_task = None
+        self._last_response = None
+        logger.info("Memory cleared and agent state reset")
+
 def main():
     if not OPENAI_API_KEY:
         print("Error: OPENAI_API_KEY not found in environment variables")
@@ -359,7 +532,28 @@ def main():
 
     agent = OnboardingAgent()
     case_id = "CAS-dwdwd-dwedwedew"
-    agent.execute_workflow(case_id)
+    
+    try:
+        # Execute the workflow
+        agent.execute_workflow(case_id)
+        
+        # Export memory to file
+        memory_file = f"memory_{case_id}.json"
+        agent.export_memory_to_file(memory_file)
+        print(f"\nMemory exported to {memory_file}")
+        
+        # Print summary
+        summary = agent.get_case_summary(case_id)
+        print("\nCase Summary:")
+        print(f"Total Tasks Processed: {summary['totalTasks']}")
+        print(f"Processed Task IDs: {', '.join(summary['processedTasks'])}")
+        
+    except Exception as e:
+        print(f"Error during workflow execution: {str(e)}")
+        # Export memory even if there's an error
+        memory_file = f"memory_{case_id}_error.json"
+        agent.export_memory_to_file(memory_file)
+        print(f"\nMemory exported to {memory_file}")
 
 if __name__ == "__main__":
     main() 
