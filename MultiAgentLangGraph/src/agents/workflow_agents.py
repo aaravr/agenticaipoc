@@ -258,20 +258,43 @@ class MCPClient:
             "params": params
         }
 
-        resp = self._session.post(self.mcp_url, json=rpc, timeout=30)
-        resp.raise_for_status()
+        try:
+            resp = self._session.post(self.mcp_url, json=rpc, timeout=30)
+            resp.raise_for_status()
 
-        for event in self._event_iterator:
-            if not event.data:
-                continue
-            try:
-                payload = json.loads(event.data)
-            except json.JSONDecodeError:
-                continue
-            if payload.get("id") != req_id:
-                continue
-            return payload.get("result")
-        return None
+            for event in self._event_iterator:
+                if not event.data:
+                    continue
+                try:
+                    payload = json.loads(event.data)
+                except json.JSONDecodeError:
+                    continue
+                if payload.get("id") != req_id:
+                    continue
+                return payload.get("result")
+            return None
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to send request to {self.mcp_url}: {str(e)}")
+            if "localhost" in self.mcp_url or "127.0.0.1" in self.mcp_url:
+                logger.info("Attempting direct connection to localhost...")
+                # Try direct connection for localhost
+                self._session.proxies = {"no_proxy": "*"}
+                resp = self._session.post(self.mcp_url, json=rpc, timeout=30)
+                resp.raise_for_status()
+                
+                for event in self._event_iterator:
+                    if not event.data:
+                        continue
+                    try:
+                        payload = json.loads(event.data)
+                    except json.JSONDecodeError:
+                        continue
+                    if payload.get("id") != req_id:
+                        continue
+                    return payload.get("result")
+            else:
+                raise
 
     async def call_tool(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Call a tool and handle its response."""
@@ -344,6 +367,13 @@ class MCPClient:
             self._session.close()
         if self._sse_client:
             self._sse_client.close()
+
+    def list_tools(self) -> List[Dict[str, Any]]:
+        """Get available tools from MCP server."""
+        result = self._sse_request("tools/list", {})
+        if not result or "tools" not in result:
+            raise RuntimeError("No tools returned by MCP server")
+        return result["tools"]
 
 # Initialize MCP client
 MCP_BASE_URL = os.getenv("MCP_BASE_URL", "http://localhost:8080/mcp/message")
@@ -442,7 +472,13 @@ class SupervisorAgent(Agent):
             - Do not include any text outside the JSON structure
             """
             
+            logger.info("\n=== LLM Request ===")
+            logger.info(f"Prompt:\n{analysis_prompt}")
+            
             analysis_response = self.llm.invoke(analysis_prompt)
+            
+            logger.info("\n=== LLM Response ===")
+            logger.info(f"Response:\n{analysis_response.content}")
             
             try:
                 # First try direct JSON parsing
@@ -466,6 +502,9 @@ class SupervisorAgent(Agent):
                         analysis = json.loads(json_match.group())
                     else:
                         raise ValueError(f"Could not parse LLM response as JSON: {content}")
+            
+            logger.info("\n=== Parsed Analysis ===")
+            logger.info(f"Analysis:\n{json.dumps(analysis, indent=2)}")
             
             # Validate required fields
             required_fields = ["task_analysis", "required_tools", "next_agent", "reasoning"]
@@ -502,14 +541,36 @@ class TaskAgent(Agent):
         self._last_claimed_task = None
         self._empty_task_list_count = 0
         self._max_empty_retries = 3
+        self._task_status_mapping = {
+            "Open": "Open",
+            "In Progress": "In Progress",
+            "Completed": "Completed",
+            "Unavailable": "Unavailable",
+            "Error": "Error"
+        }
+        self._last_action = None
+        self._consecutive_same_actions = 0
+        self._max_consecutive_actions = 3
+
+    def _normalize_task_status(self, status: str) -> str:
+        """Normalize task status to handle environment differences."""
+        return self._task_status_mapping.get(status, status)
 
     def _is_task_processed(self, task_id: str) -> bool:
         """Check if a task has been processed."""
         return task_id in self._processed_tasks
 
-    def _get_task_rule(self, task_key: str) -> Optional[TaskProcessingRule]:
-        """Get the processing rule for a task."""
-        return next((rule for rule in self.config.task_rules if rule.task_key == task_key), None)
+    def _check_action_loop(self, action: str) -> bool:
+        """Check if we're stuck in an action loop."""
+        if self._last_action == action:
+            self._consecutive_same_actions += 1
+            if self._consecutive_same_actions >= self._max_consecutive_actions:
+                logger.warning(f"Detected action loop: {action} called {self._consecutive_same_actions} times")
+                return True
+        else:
+            self._last_action = action
+            self._consecutive_same_actions = 1
+        return False
 
     def _format_task_prompt(self, state: Dict[str, Any], available_tools: List[Tool]) -> str:
         """Format the task processing prompt."""
@@ -527,9 +588,15 @@ class TaskAgent(Agent):
             
             Last Task Details:
             {json.dumps(self._last_task_details, indent=2) if self._last_task_details else "None"}
+            
+            Last Claimed Task:
+            {self._last_claimed_task}
+            
+            Last Action:
+            {self._last_action} (repeated {self._consecutive_same_actions} times)
             """
         
-        return f"""
+        prompt = f"""
         You are a task execution agent that needs to determine and execute the next tool based on the current state.
         
         Available Tools:
@@ -563,7 +630,16 @@ class TaskAgent(Agent):
         - If no tasks are available, use getTaskDetails to check for new tasks
         - If there is an Open task, claim it first
         - After claiming a task, complete it
+        - Handle task statuses: {list(self._task_status_mapping.keys())}
+        - Avoid repeating the same action multiple times
+        - If a task is already claimed, complete it before claiming another
+        - If a task is already completed, get updated task list
         """
+        
+        logger.info("\n=== Task Agent Prompt ===")
+        logger.info(f"Prompt:\n{prompt}")
+        
+        return prompt
 
     def _format_task_rules(self) -> str:
         """Format task processing rules for the prompt."""
@@ -667,6 +743,9 @@ class TaskAgent(Agent):
             execution_prompt = self._format_task_prompt(state, available_tools)
             execution_response = self.llm.invoke(execution_prompt)
             
+            logger.info("\n=== Task Agent Response ===")
+            logger.info(f"Response:\n{execution_response.content}")
+            
             try:
                 plan = json.loads(execution_response.content)
             except json.JSONDecodeError:
@@ -685,6 +764,9 @@ class TaskAgent(Agent):
                     else:
                         raise ValueError(f"Could not parse LLM response as JSON: {content}")
             
+            logger.info("\n=== Parsed Execution Plan ===")
+            logger.info(f"Plan:\n{json.dumps(plan, indent=2)}")
+            
             # Validate required fields
             if "tool" not in plan or "input" not in plan:
                 raise ValueError("Missing required fields in execution plan")
@@ -694,6 +776,13 @@ class TaskAgent(Agent):
                 # If no tool specified, default to getTaskDetails
                 tool_name = "getTaskDetails"
                 plan["input"] = {"caseInstanceId": state["case_id"]}
+            
+            # Check for action loops
+            if self._check_action_loop(tool_name):
+                # Force getTaskDetails to break the loop
+                tool_name = "getTaskDetails"
+                plan["input"] = {"caseInstanceId": state["case_id"]}
+                logger.info(f"Breaking action loop by forcing getTaskDetails")
             
             tool_input = plan["input"]
             
@@ -736,7 +825,7 @@ class TaskAgent(Agent):
                     # Filter for unprocessed tasks with Open status
                     open_tasks = [
                         t for t in result 
-                        if t.get("status") == "Open" 
+                        if self._normalize_task_status(t.get("status")) == "Open" 
                         and not self._is_task_processed(t.get("taskId"))
                     ]
                     
@@ -752,7 +841,10 @@ class TaskAgent(Agent):
                         state["next_agent"] = "task_handler"
                     else:
                         # Check if we have any unavailable tasks that might become available
-                        unavailable_tasks = [t for t in result if t.get("status") == "Unavailable"]
+                        unavailable_tasks = [
+                            t for t in result 
+                            if self._normalize_task_status(t.get("status")) == "Unavailable"
+                        ]
                         if unavailable_tasks:
                             state["next_agent"] = "task_handler"
                         else:
@@ -824,19 +916,95 @@ class Workflow:
         """Initialize tools from MCP discovery."""
         try:
             # Get available tools from MCP
-            available_tools = asyncio.run(MCP_CLIENT.call_tool("tools/list", {}))
+            available_tools = MCP_CLIENT.list_tools()
+            logger.info(f"Tool discovery response type: {type(available_tools)}")
             logger.info(f"Tool discovery response: {json.dumps(available_tools, indent=2)}")
             
-            # Register default tools since tools/list only returns success status
+            # Default tool configurations that should work in any environment
             default_tools = [
-                DynamicTool("getTaskDetails", "Get details of tasks for a case instance"),
-                DynamicTool("claimTask", "Claim a task for processing"),
-                DynamicTool("completeTask", "Complete a task")
+                {
+                    "name": "getTaskDetails",
+                    "description": "Get details of tasks for a case instance",
+                    "required": True
+                },
+                {
+                    "name": "claimTask",
+                    "description": "Claim a task for processing",
+                    "required": True
+                },
+                {
+                    "name": "completeTask",
+                    "description": "Complete a task",
+                    "required": True
+                }
             ]
             
-            for tool in default_tools:
-                self.tool_registry.register_tool(tool)
-            logger.info(f"Registered {len(default_tools)} default tools")
+            # Register tools based on discovery response
+            if isinstance(available_tools, list):
+                logger.info("Processing list of available tools")
+                # If tools/list returns a list of tool names
+                for tool_name in available_tools:
+                    logger.info(f"Processing tool: {tool_name}")
+                    if isinstance(tool_name, dict):
+                        tool_name = tool_name.get("name", "")
+                        logger.info(f"Extracted tool name from dict: {tool_name}")
+                    tool_config = next((t for t in default_tools if t["name"] == tool_name), None)
+                    if tool_config:
+                        tool = DynamicTool(
+                            name=tool_config["name"],
+                            description=tool_config["description"]
+                        )
+                        self.tool_registry.register_tool(tool)
+                        logger.info(f"Registered tool: {tool_config['name']}")
+                    else:
+                        logger.warning(f"No matching config found for tool: {tool_name}")
+            elif isinstance(available_tools, dict):
+                logger.info("Processing dictionary of available tools")
+                # If tools/list returns a dict with status and data
+                if available_tools.get("status") == "success":
+                    logger.info("Success status received, registering all default tools")
+                    # If all tools are available
+                    for tool_config in default_tools:
+                        tool = DynamicTool(
+                            name=tool_config["name"],
+                            description=tool_config["description"]
+                        )
+                        self.tool_registry.register_tool(tool)
+                        logger.info(f"Registered tool: {tool_config['name']}")
+                elif "data" in available_tools:
+                    logger.info("Found data field in response")
+                    # If tools are in data field
+                    data = available_tools["data"]
+                    if isinstance(data, list):
+                        logger.info(f"Processing data list: {json.dumps(data, indent=2)}")
+                        for tool_info in data:
+                            if isinstance(tool_info, dict) and "name" in tool_info:
+                                tool_name = tool_info["name"]
+                                logger.info(f"Processing tool from data: {tool_name}")
+                                tool_config = next((t for t in default_tools if t["name"] == tool_name), None)
+                                if tool_config:
+                                    tool = DynamicTool(
+                                        name=tool_config["name"],
+                                        description=tool_config["description"]
+                                    )
+                                    self.tool_registry.register_tool(tool)
+                                    logger.info(f"Registered tool: {tool_config['name']}")
+                                else:
+                                    logger.warning(f"No matching config found for tool: {tool_name}")
+            
+            # Log registered tools
+            registered_tools = self.tool_registry.get_all_tools()
+            logger.info(f"Registered tools: {[t.name for t in registered_tools]}")
+            
+            # Verify required tools are available
+            required_tools = [t["name"] for t in default_tools if t.get("required", False)]
+            missing_tools = [tool for tool in required_tools if not self.tool_registry.get_tool(tool)]
+            
+            if missing_tools:
+                logger.error(f"Missing required tools: {', '.join(missing_tools)}")
+                logger.error(f"Available tools from server: {json.dumps(available_tools, indent=2)}")
+                logger.error(f"Registered tools: {[t.name for t in registered_tools]}")
+                raise ValueError(f"Required tools not available: {', '.join(missing_tools)}")
                 
         except Exception as e:
             logger.error(f"Error during tool discovery: {str(e)}")
@@ -901,11 +1069,22 @@ class Workflow:
 
 if __name__ == "__main__":
     try:
-        # Initialize LLM
-        llm = ChatOpenAI(
-            model="gpt-4-turbo",
-            temperature=0
-        )
+        # Initialize LLM with proxy settings
+        openai_config = {
+            "api_key": OPENAI_API_KEY,
+            "model": "gpt-4-turbo",
+            "temperature": 0
+        }
+        
+        # Add proxy settings if they exist
+        if HTTP_PROXY or HTTPS_PROXY:
+            transport = httpx.HTTPTransport(
+                proxy=HTTPS_PROXY or HTTP_PROXY,
+                verify=True
+            )
+            openai_config["http_client"] = httpx.Client(transport=transport)
+        
+        llm = ChatOpenAI(**openai_config)
 
         # Create workflow with LLM
         workflow = Workflow(llm)
