@@ -353,154 +353,48 @@ class Tool(Protocol):
     """Protocol defining the interface for tools."""
     name: str
     description: str
-    config: ToolConfig
     execute: Callable[[Dict[str, Any]], Dict[str, Any]]
 
 class BaseTool:
     """Base class for all tools."""
-    def __init__(self, config: ToolConfig):
-        self.name = config.name
-        self.description = config.description
-        self.config = config
-
-    def validate_input(self, input_data: Dict[str, Any]) -> bool:
-        """Validate input against the tool's schema."""
-        try:
-            # Check required fields
-            for field in self.config.required_fields:
-                parts = field.split('.')
-                current = input_data
-                for part in parts:
-                    if not isinstance(current, dict) or part not in current:
-                        return False
-                    current = current[part]
-            return True
-        except Exception:
-            return False
-
-    def format_input(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Format input according to the tool's schema."""
-        return input_data
-
-    def validate_output(self, output_data: Dict[str, Any]) -> bool:
-        """Validate output against the tool's schema."""
-        try:
-            # Basic validation - can be extended
-            return isinstance(output_data, dict) and "status" in output_data
-        except Exception:
-            return False
-
-class GetTaskDetailsTool(BaseTool):
-    """Tool for getting task details."""
-    async def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute the tool."""
-        if not self.validate_input(input_data):
-            return {"status": "error", "message": "Invalid input format"}
-        
-        formatted_input = self.format_input(input_data)
-        result = await MCP_CLIENT.call_tool(self.name, formatted_input)
-        
-        # Format the result to match expected schema
-        if isinstance(result, list):
-            return {
-                "status": "success",
-                "data": result
-            }
-        elif isinstance(result, dict):
-            if "status" in result:
-                return result
-            else:
-                return {
-                    "status": "success",
-                    "data": [result]
-                }
-        else:
-            return {
-                "status": "error",
-                "message": "Unexpected response format"
-            }
-
-class ClaimTaskTool(BaseTool):
-    """Tool for claiming tasks."""
-    async def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute the tool."""
-        if not self.validate_input(input_data):
-            return {"status": "error", "message": "Invalid input format"}
-        
-        formatted_input = self.format_input(input_data)
-        result = await MCP_CLIENT.call_tool(self.name, formatted_input)
-        
-        # Format the result to match expected schema
-        if isinstance(result, dict):
-            if "status" in result:
-                return result
-            else:
-                return {
-                    "status": "success",
-                    "data": result
-                }
-        else:
-            return {
-                "status": "error",
-                "message": "Unexpected response format"
-            }
-
-class CompleteTaskTool(BaseTool):
-    """Tool for completing tasks."""
-    def __init__(self, config: ToolConfig, task_rules: List[TaskProcessingRule]):
-        super().__init__(config)
-        self.task_rules = task_rules
-
-    def get_task_rule(self, task_key: str) -> Optional[TaskProcessingRule]:
-        """Get the processing rule for a task."""
-        return next((rule for rule in self.task_rules if rule.task_key == task_key), None)
-
-    def format_task_payload(self, task_id: str, task_key: Optional[str] = None) -> Dict[str, Any]:
-        """Format the task completion payload."""
-        if task_key:
-            rule = self.get_task_rule(task_key)
-            if rule and rule.special_handling:
-                payload = rule.payload_template.copy()
-                payload["completeRequest"]["taskId"] = task_id
-                return payload
-        
-        # Default payload
-        return {
-            "completeRequest": {
-                "taskId": task_id
-            }
-        }
+    def __init__(self, name: str, description: str):
+        self.name = name
+        self.description = description
 
     async def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the tool."""
-        if not self.validate_input(input_data):
-            return {"status": "error", "message": "Invalid input format"}
-        
-        # Extract task information
-        task_id = input_data.get("completeRequest", {}).get("taskId")
-        task_key = input_data.get("completeRequest", {}).get("taskKey")
-        
-        if not task_id:
-            return {"status": "error", "message": "Missing taskId"}
-        
-        # Format the payload
-        formatted_input = self.format_task_payload(task_id, task_key)
-        result = await MCP_CLIENT.call_tool(self.name, formatted_input)
-        
-        # Format the result to match expected schema
-        if isinstance(result, dict):
-            if "status" in result:
-                return result
-            else:
-                return {
-                    "status": "success",
-                    "data": result
-                }
-        else:
-            return {
-                "status": "error",
-                "message": "Unexpected response format"
-            }
+        raise NotImplementedError("Subclasses must implement execute method")
+
+class DynamicTool(BaseTool):
+    """Tool that uses MCP client for execution."""
+    def __init__(self, name: str, description: str):
+        super().__init__(name, description)
+        self.mcp_client = MCP_CLIENT
+
+    async def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the tool using MCP client."""
+        return await self.mcp_client.call_tool(self.name, input_data)
+
+class ToolRegistry:
+    """Registry for managing available tools."""
+    def __init__(self):
+        self._tools: Dict[str, Tool] = {}
+
+    def register_tool(self, tool: Tool) -> None:
+        """Register a tool in the registry."""
+        self._tools[tool.name] = tool
+
+    def get_tool(self, name: str) -> Optional[Tool]:
+        """Get a tool by name."""
+        return self._tools.get(name)
+
+    def get_all_tools(self) -> List[Tool]:
+        """Get all registered tools."""
+        return list(self._tools.values())
+
+    def get_tool_descriptions(self) -> List[Dict[str, str]]:
+        """Get descriptions of all tools."""
+        return [{"name": t.name, "description": t.description} for t in self._tools.values()]
 
 class Agent(ABC):
     """Base class for all agents."""
@@ -628,9 +522,6 @@ class TaskAgent(Agent):
             Current Tasks:
             {json.dumps(state["current_task"], indent=2)}
             
-            Task Processing Rules:
-            {self._format_task_rules()}
-            
             Processed Tasks:
             {list(self._processed_tasks)}
             
@@ -669,6 +560,9 @@ class TaskAgent(Agent):
         - Your response MUST be valid JSON
         - Do not include any text outside the JSON structure
         - Do not process tasks that have already been processed: {list(self._processed_tasks)}
+        - If no tasks are available, use getTaskDetails to check for new tasks
+        - If there is an Open task, claim it first
+        - After claiming a task, complete it
         """
 
     def _format_task_rules(self) -> str:
@@ -796,6 +690,11 @@ class TaskAgent(Agent):
                 raise ValueError("Missing required fields in execution plan")
             
             tool_name = plan["tool"]
+            if not tool_name:
+                # If no tool specified, default to getTaskDetails
+                tool_name = "getTaskDetails"
+                plan["input"] = {"caseInstanceId": state["case_id"]}
+            
             tool_input = plan["input"]
             
             # Find and execute the tool
@@ -828,47 +727,45 @@ class TaskAgent(Agent):
             
             # Handle getTaskDetails result
             if tool_name == "getTaskDetails":
-                if result.get("status") == "success":
-                    tasks = result.get("data", [])
-                    if isinstance(tasks, list):
-                        # Store the last task details for reference
-                        self._last_task_details = tasks
-                        # Log all tasks for debugging
-                        logger.info(f"All tasks from server: {json.dumps(tasks, indent=2)}")
-                        
-                        # Filter for unprocessed tasks with completion status
-                        open_tasks = [
-                            t for t in tasks 
-                            if t.get("status") == self.config.status_config.completion_status 
-                            and not self._is_task_processed(t.get("taskId"))
-                        ]
-                        
-                        # Log filtered tasks for debugging
-                        logger.info(f"Filtered tasks with status {self.config.status_config.completion_status}: {json.dumps(open_tasks, indent=2)}")
-                        logger.info(f"Processed tasks: {list(self._processed_tasks)}")
-                        
-                        state["current_task"] = open_tasks
-                        state["processed_tasks"] = list(self._processed_tasks)
-                        
-                        # Check if we should continue processing
-                        if not self._should_continue_processing(tasks):
-                            logger.info("No more tasks to process")
-                            state["next_agent"] = "end"
-                        else:
-                            state["next_agent"] = "task_handler"
-                        return state
+                if isinstance(result, list):
+                    # Store the last task details for reference
+                    self._last_task_details = result
+                    # Log all tasks for debugging
+                    logger.info(f"All tasks from server: {json.dumps(result, indent=2)}")
+                    
+                    # Filter for unprocessed tasks with Open status
+                    open_tasks = [
+                        t for t in result 
+                        if t.get("status") == "Open" 
+                        and not self._is_task_processed(t.get("taskId"))
+                    ]
+                    
+                    # Log filtered tasks for debugging
+                    logger.info(f"Filtered tasks with Open status: {json.dumps(open_tasks, indent=2)}")
+                    logger.info(f"Processed tasks: {list(self._processed_tasks)}")
+                    
+                    state["current_task"] = open_tasks
+                    state["processed_tasks"] = list(self._processed_tasks)
+                    
+                    # If we have open tasks, continue processing
+                    if open_tasks:
+                        state["next_agent"] = "task_handler"
                     else:
-                        state["error"] = "Invalid task details format"
-                        state["next_agent"] = "end"
-                        return state
+                        # Check if we have any unavailable tasks that might become available
+                        unavailable_tasks = [t for t in result if t.get("status") == "Unavailable"]
+                        if unavailable_tasks:
+                            state["next_agent"] = "task_handler"
+                        else:
+                            state["next_agent"] = "end"
+                    return state
                 else:
-                    state["error"] = result.get("message", "Failed to get task details")
+                    state["error"] = "Invalid task details format"
                     state["next_agent"] = "end"
                     return state
             
             # Handle claimTask result
             if tool_name == "claimTask":
-                if result.get("status") == "success":
+                if isinstance(result, dict) and result.get("status") == "success":
                     # Extract taskId from input
                     task_id = tool_input.get("claimRequest", {}).get("taskId")
                     if task_id:
@@ -878,13 +775,13 @@ class TaskAgent(Agent):
                         state["last_claimed_task"] = task_id
                         return state
                 else:
-                    state["error"] = result.get("message", "Failed to claim task")
+                    state["error"] = "Failed to claim task"
                     state["next_agent"] = "end"
                     return state
             
             # Handle completeTask result
             if tool_name == "completeTask":
-                if result.get("status") == "success":
+                if isinstance(result, dict) and result.get("status") == "success":
                     # Extract taskId from input
                     task_id = tool_input.get("completeRequest", {}).get("taskId")
                     if task_id:
@@ -898,20 +795,9 @@ class TaskAgent(Agent):
                         state["next_agent"] = "task_handler"
                         return state
                 else:
-                    state["error"] = result.get("message", "Failed to complete task")
+                    state["error"] = "Failed to complete task"
                     state["next_agent"] = "end"
                     return state
-            
-            # Analyze result and determine next steps
-            analysis = self._analyze_result(tool_name, tool_input, result, state)
-            
-            # Check for errors
-            if result.get("status") == "error":
-                state["error"] = result.get("message", "Unknown error")
-                state["next_agent"] = "end"
-            else:
-                # Determine next agent based on analysis
-                state["next_agent"] = "task_handler" if analysis.get("continue_execution", False) else "end"
             
             return state
             
@@ -931,7 +817,31 @@ class Workflow:
         }
         self.state = self._create_initial_state()
         self.workflow_start_time = None
-    
+        self.tool_registry = ToolRegistry()
+        self._initialize_tools()
+
+    def _initialize_tools(self) -> None:
+        """Initialize tools from MCP discovery."""
+        try:
+            # Get available tools from MCP
+            available_tools = asyncio.run(MCP_CLIENT.call_tool("tools/list", {}))
+            logger.info(f"Tool discovery response: {json.dumps(available_tools, indent=2)}")
+            
+            # Register default tools since tools/list only returns success status
+            default_tools = [
+                DynamicTool("getTaskDetails", "Get details of tasks for a case instance"),
+                DynamicTool("claimTask", "Claim a task for processing"),
+                DynamicTool("completeTask", "Complete a task")
+            ]
+            
+            for tool in default_tools:
+                self.tool_registry.register_tool(tool)
+            logger.info(f"Registered {len(default_tools)} default tools")
+                
+        except Exception as e:
+            logger.error(f"Error during tool discovery: {str(e)}")
+            raise
+
     def _create_initial_state(self) -> Dict[str, Any]:
         return {
             "case_id": None,
@@ -951,7 +861,7 @@ class Workflow:
             }
         }
     
-    async def run(self, case_id: str, available_tools: List[Tool]) -> Dict[str, Any]:
+    async def run(self, case_id: str) -> Dict[str, Any]:
         """Run the workflow for a case."""
         self.workflow_start_time = datetime.now()
         self.state["case_id"] = case_id
@@ -976,8 +886,8 @@ class Workflow:
                 "timestamp": datetime.now().isoformat()
             })
             
-            # Execute agent
-            self.state = await current_agent.process(self.state, available_tools)
+            # Execute agent with available tools
+            self.state = await current_agent.process(self.state, self.tool_registry.get_all_tools())
             
             if self.state.get("error"):
                 logger.error(f"Workflow error in {current_agent_name}: {self.state['error']}")
@@ -997,32 +907,12 @@ if __name__ == "__main__":
             temperature=0
         )
 
-        # Initialize tools with configuration
-        tools = [
-            GetTaskDetailsTool(DEFAULT_TOOL_CONFIGS[0]),
-            ClaimTaskTool(DEFAULT_TOOL_CONFIGS[1]),
-            CompleteTaskTool(DEFAULT_TOOL_CONFIGS[2], DEFAULT_TASK_RULES)
-        ]
-
         # Create workflow with LLM
         workflow = Workflow(llm)
 
-        # Initial state
-        initial_state = {
-            "case_id": "CAS-123",
-            "current_task": None,
-            "last_response": None,
-            "error": None,
-            "next_agent": "task_handler",
-            "workflow_metadata": {
-                "start_time": datetime.now().isoformat(),
-                "tool_executions": []
-            }
-        }
-
         # Run workflow
         logger.info("Starting workflow...")
-        final_state = asyncio.run(workflow.run(initial_state["case_id"], tools))
+        final_state = asyncio.run(workflow.run("CAS-123"))
         logger.info("Workflow completed with final state:")
         logger.info(json.dumps(final_state, indent=2))
 
